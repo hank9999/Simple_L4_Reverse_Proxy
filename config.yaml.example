@@ -1,0 +1,49 @@
+# config.yaml - 示例配置文件
+# 全局配置
+global:
+  connect_timeout: 10        # 连接超时时间（秒）
+  read_write_timeout: 30     # 读写超时时间（秒）
+  max_connections: 1000      # 最大并发连接数
+
+# 监听器配置
+listeners:
+  # TCP 代理
+  - bind: "0.0.0.0:8080"
+    protocol: TCP
+    enable_proxy_protocol: true
+    load_balance: RoundRobin
+    backends:
+      - address: "192.168.1.10:80"
+        weight: 1
+      - address: "192.168.1.11:80"
+        weight: 2
+
+  # UDP 代理
+  - bind: "0.0.0.0:2345"
+    protocol: UDP
+    load_balance: RoundRobin
+    backends:
+      - address: "8.8.8.8:2345"
+        weight: 1
+      - address: "8.8.4.4:3456"
+        weight: 1
+      - address: "1.1.1.1:5555"
+        weight: 1
+    udp_config:
+      session_timeout: 60      # UDP 会话超时时间（秒）
+      buffer_size: 4096        # UDP 缓冲区大小
+      max_sessions: 1000       # 最大会话数
+
+  # 游戏服务器 UDP 代理
+  - bind: "0.0.0.0:7777"
+    protocol: UDP
+    load_balance: LeastConnections
+    backends:
+      - address: "192.168.1.100:7777"
+        weight: 1
+      - address: "192.168.1.101:7777"
+        weight: 1
+    udp_config:
+      session_timeout: 1800    # 30分钟会话超时
+      buffer_size: 65536       # 64KB 缓冲区
+      max_sessions: 5000       # 支持更多会话
