@@ -5,8 +5,26 @@ A simple 4-layer TCP UDP reverse proxy with proxy protocol support.
 本项目原本只是为了解决MC服务端(Velocity/Geyser)中的proxy protocol转换, 后发现用途广泛, 遂上传至github。  
 This project was originally intended to solve the proxy protocol conversion in the MC server (Velocity/Geyser), but later I found that it had a wide range of uses, so I uploaded it to GitHub.  
 
-本项目最初版本由AI辅助完成，后期进行代码审核和整理。  
+本项目最初版本由AI辅助完成，后期进行代码审核和完善。  
 The initial version of this project was completed with AI assistance, I will review and refine the code later.  
+
+## 代码审核进度 | Code review progress  
+- [x] main.rs 
+- [x] config.rs
+- [x] protocol.rs
+- [x] server.rs
+- [x] load_balancer.rs
+- [ ] proxy.rs
+- [ ] udp_proxy.rs
+
+## 代码完善进度 | Code improvement progress  
+- [x] main.rs
+- [x] config.rs
+- [x] protocol.rs
+- [x] server.rs
+- [ ] load_balancer.rs
+- [ ] proxy.rs
+- [ ] udp_proxy.rs
 
 ## 配置 | Config
 查看 config.yaml.example 文件。  
