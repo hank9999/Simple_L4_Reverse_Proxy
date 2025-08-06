@@ -1,16 +1,17 @@
-# config.yaml - 示例配置文件
-# 全局配置
+# config.yaml - 示例配置文件 | Example configuration file
+# 全局配置 | Global Configuration
 global:
   connect_timeout: 10        # 连接超时时间（秒）
   read_write_timeout: 30     # 读写超时时间（秒）
   max_connections: 1000      # 最大并发连接数
 
-# 监听器配置
+# 监听器配置 | Listener Configuration
 listeners:
-  # TCP 代理
+  # TCP 代理 | TCP Proxy
   - bind: "0.0.0.0:8080"
     protocol: TCP
     enable_proxy_protocol: true
+    # 负载均衡规则 | Load balancing rules: RoundRobin, WeightedRoundRobin, LeastConnections
     load_balance: RoundRobin
     backends:
       - address: "192.168.1.10:80"
@@ -18,7 +19,7 @@ listeners:
       - address: "192.168.1.11:80"
         weight: 2
 
-  # UDP 代理
+  # UDP 代理 | UDP Proxy
   - bind: "0.0.0.0:2345"
     protocol: UDP
     load_balance: RoundRobin
@@ -34,7 +35,7 @@ listeners:
       buffer_size: 4096        # UDP 缓冲区大小
       max_sessions: 1000       # 最大会话数
 
-  # 游戏服务器 UDP 代理
+  # 游戏服务器 UDP 代理 | Game Server UDP Proxy
   - bind: "0.0.0.0:7777"
     protocol: UDP
     load_balance: LeastConnections
