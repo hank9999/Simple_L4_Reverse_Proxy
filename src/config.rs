@@ -69,7 +69,7 @@ pub struct HealthCheckConfig {
     pub timeout: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum LoadBalanceStrategy {
     RoundRobin,
     WeightedRoundRobin,
