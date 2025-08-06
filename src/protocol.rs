@@ -23,6 +23,11 @@ impl ProxyProtocolV2 {
 
     /// 生成 PROXY Protocol v2 头部
     pub fn generate_header(header: &ProxyHeader) -> Bytes {
+        // 提前判断非同栈, 非同栈不符合规定, 不发送Proxy Protocol v2包
+        if header.src_addr.is_ipv4() != header.dst_addr.is_ipv4() {
+            return Bytes::new();
+        }
+
         let mut buf = BytesMut::new();
 
         // 添加签名
