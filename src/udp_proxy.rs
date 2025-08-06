@@ -4,12 +4,12 @@ use crate::protocol::{Protocol, ProxyHeader, ProxyProtocolV2}; // <--- 新增导
 use anyhow::Result;
 use dashmap::DashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::{interval, timeout};
 use tracing::{debug, error, info, warn};
+use crate::load_balancer::LoadBalancer;
 
 #[derive(Debug, Clone)]
 struct UdpSession {
@@ -18,45 +18,9 @@ struct UdpSession {
     backend_socket: Arc<UdpSocket>,
 }
 
-pub struct UdpLoadBalancer {
-    backends: Vec<BackendConfig>,
-    strategy: LoadBalanceStrategy,
-    current: AtomicUsize,
-}
-
-impl UdpLoadBalancer {
-    pub fn new(backends: Vec<BackendConfig>, strategy: LoadBalanceStrategy) -> Self {
-        Self {
-            backends,
-            strategy,
-            current: AtomicUsize::new(0),
-        }
-    }
-
-    pub fn select_backend(&self) -> Option<&BackendConfig> {
-        if self.backends.is_empty() {
-            return None;
-        }
-        match self.strategy {
-            LoadBalanceStrategy::RoundRobin => {
-                let index = self.current.fetch_add(1, Ordering::Relaxed) % self.backends.len();
-                Some(&self.backends[index])
-            }
-            LoadBalanceStrategy::WeightedRoundRobin => {
-                let index = self.current.fetch_add(1, Ordering::Relaxed) % self.backends.len();
-                Some(&self.backends[index])
-            }
-            LoadBalanceStrategy::LeastConnections => {
-                let index = self.current.fetch_add(1, Ordering::Relaxed) % self.backends.len();
-                Some(&self.backends[index])
-            }
-        }
-    }
-}
-
 pub struct UdpProxyHandler {
     sessions: Arc<DashMap<SocketAddr, UdpSession>>,
-    load_balancer: Arc<UdpLoadBalancer>,
+    load_balancer: Arc<LoadBalancer>,
     enable_proxy_protocol: bool,
     config: UdpConfig,
     client_socket: Arc<UdpSocket>,
@@ -75,7 +39,7 @@ impl UdpProxyHandler {
 
         Ok(Self {
             sessions: Arc::new(DashMap::new()),
-            load_balancer: Arc::new(UdpLoadBalancer::new(backends, strategy)),
+            load_balancer: Arc::new(LoadBalancer::new(backends, strategy)),
             enable_proxy_protocol,
             config,
             client_socket: Arc::new(client_socket),

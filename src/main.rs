@@ -8,6 +8,7 @@ mod proxy;
 mod protocol;
 mod server;
 mod udp_proxy;
+mod load_balancer;
 
 use config::Config;
 use server::ProxyServer;
