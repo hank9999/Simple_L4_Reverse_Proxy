@@ -22,7 +22,7 @@ The initial version of this project was completed with AI assistance, I will rev
 - [x] config.rs
 - [x] protocol.rs
 - [x] server.rs
-- [ ] load_balancer.rs
+- [x] load_balancer.rs
 - [ ] proxy.rs
 - [ ] udp_proxy.rs
 
