@@ -47,10 +47,6 @@ impl LoadBalancer {
     }
 
     pub fn select_backend(&self) -> Option<&BackendConfig> {
-        if self.backends.is_empty() {
-            return None;
-        }
-
         // 优化：如果只有一个后端，直接返回
         if self.backends.len() == 1 {
             return Some(&self.backends[0]);
