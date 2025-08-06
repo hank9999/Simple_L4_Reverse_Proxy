@@ -2,10 +2,8 @@ use crate::config::{Config, ListenerConfig, ProtocolType, UdpConfig};
 use crate::proxy::ProxyHandler;
 use crate::udp_proxy::UdpProxyHandler;
 use anyhow::Result;
-use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::time::Duration;
-use tracing::{info, error};
+use tracing::error;
 
 pub struct ProxyServer {
     config: Config,
@@ -51,32 +49,16 @@ impl ProxyServer {
     }
 
     async fn run_tcp_listener(config: ListenerConfig, global_config: crate::config::GlobalConfig) -> Result<()> {
-        let listener = TcpListener::bind(config.bind).await?;
-        info!("TCP 代理服务器启动，监听地址: {}", config.bind);
-
-        let proxy_handler = Arc::new(ProxyHandler::new(
+        let tcp_handler = ProxyHandler::new(
+            config.bind,
             config.backends,
             config.load_balance,
             config.enable_proxy_protocol,
             Duration::from_secs(global_config.connect_timeout),
             Duration::from_secs(global_config.read_write_timeout),
-        ));
+        ).await?;
 
-        loop {
-            match listener.accept().await {
-                Ok((stream, addr)) => {
-                    let handler = Arc::clone(&proxy_handler);
-                    tokio::spawn(async move {
-                        if let Err(e) = handler.handle_connection(stream, addr).await {
-                            error!("处理 TCP 连接失败: {}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("接受 TCP 连接失败: {}", e);
-                }
-            }
-        }
+        tcp_handler.run().await
     }
 
     async fn run_udp_listener(config: ListenerConfig, _global_config: crate::config::GlobalConfig) -> Result<()> {

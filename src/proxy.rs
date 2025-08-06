@@ -4,9 +4,10 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, TcpListener};
 use tokio::time::{timeout, Duration};
 use tracing::{info, error, warn};
+use anyhow::Result;
 
 pub struct LoadBalancer {
     backends: Vec<BackendConfig>,
@@ -52,21 +53,45 @@ pub struct ProxyHandler {
     enable_proxy_protocol: bool,
     connect_timeout: Duration,
     rw_timeout: Duration,
+    tcp_listener: Arc<TcpListener>,
 }
 
 impl ProxyHandler {
-    pub fn new(
+    pub async fn new(
+        bind_addr: SocketAddr,
         backends: Vec<BackendConfig>,
         strategy: LoadBalanceStrategy,
         enable_proxy_protocol: bool,
         connect_timeout: Duration,
         rw_timeout: Duration,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let listener = TcpListener::bind(bind_addr).await?;
+        info!("TCP 代理服务器启动，监听地址: {}", bind_addr);
+        
+        Ok(Self {
             load_balancer: Arc::new(LoadBalancer::new(backends, strategy)),
             enable_proxy_protocol,
             connect_timeout,
             rw_timeout,
+            tcp_listener: Arc::new(listener),
+        })
+    }
+
+    pub async fn run(&self) -> Result<()> {
+        loop {
+            match self.tcp_listener.accept().await {
+                Ok((stream, addr)) => {
+                    let handler = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handler.handle_connection(stream, addr).await {
+                            error!("处理 TCP 连接失败: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("接受 TCP 连接失败: {}", e);
+                }
+            }
         }
     }
 
@@ -181,5 +206,17 @@ impl ProxyHandler {
         }
 
         Ok(())
+    }
+}
+
+impl Clone for ProxyHandler {
+    fn clone(&self) -> Self {
+        Self {
+            load_balancer: Arc::clone(&self.load_balancer),
+            enable_proxy_protocol: self.enable_proxy_protocol,
+            connect_timeout: self.connect_timeout,
+            rw_timeout: self.rw_timeout,
+            tcp_listener: Arc::clone(&self.tcp_listener),
+        }
     }
 }
