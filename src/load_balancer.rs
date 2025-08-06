@@ -29,6 +29,10 @@ impl LoadBalancer {
             panic!("所有后端权重必须大于0");
         }
 
+        if strategy == LoadBalanceStrategy::LeastConnections {
+            warn!("最少连接数未实现, 降级到简单轮训");
+        }
+
         // 初始化加权轮询后端列表
         let weighted_backends = backends
             .iter()
