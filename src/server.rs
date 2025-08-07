@@ -55,7 +55,7 @@ impl ProxyServer {
             config.load_balance,
             config.enable_proxy_protocol,
             Duration::from_secs(global_config.connect_timeout),
-            Duration::from_secs(global_config.read_write_timeout),
+            Duration::from_secs(global_config.idle_timeout),
             global_config.max_connections,
         ).await?;
 

@@ -3,18 +3,19 @@ use crate::protocol::{ProxyProtocolV2, ProxyHeader, Protocol};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, TcpListener};
 use tokio::time::{timeout, Duration};
 use tracing::{info, error, warn};
 use anyhow::Result;
 use crate::load_balancer::LoadBalancer;
+use socket2::{Socket, TcpKeepalive};
 
 pub struct ProxyHandler {
     load_balancer: Arc<LoadBalancer>,
     enable_proxy_protocol: bool,
     connect_timeout: Duration,
-    rw_timeout: Duration,
+    idle_timeout: Duration,
     tcp_listener: Arc<TcpListener>,
     // 连接计数器
     active_connections: Arc<AtomicUsize>,
@@ -29,7 +30,7 @@ impl ProxyHandler {
         strategy: LoadBalanceStrategy,
         enable_proxy_protocol: bool,
         connect_timeout: Duration,
-        rw_timeout: Duration,
+        idle_timeout: Duration,
         max_connections: usize,
     ) -> Result<Self> {
         let listener = TcpListener::bind(bind_addr).await?;
@@ -45,7 +46,7 @@ impl ProxyHandler {
             load_balancer: Arc::new(LoadBalancer::new(backends, strategy)),
             enable_proxy_protocol,
             connect_timeout,
-            rw_timeout,
+            idle_timeout,
             tcp_listener: Arc::new(listener),
             active_connections: Arc::new(AtomicUsize::new(0)),
             max_connections,
@@ -86,7 +87,55 @@ impl ProxyHandler {
         }
     }
 
+    /// 配置 TCP keepalive 实现空闲超时
+    fn configure_tcp_keepalive(&self, stream: &TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // 如果空闲超时为 0，不设置 keepalive
+        if self.idle_timeout.as_secs() == 0 {
+            return Ok(());
+        }
+
+        // 获取底层 socket
+        let socket = unsafe {
+            // 获取原始 socket 文件描述符
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                Socket::from_raw_fd(stream.as_raw_fd())
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawSocket;
+                use std::os::windows::io::FromRawSocket;
+                Socket::from_raw_socket(stream.as_raw_socket())
+            }
+        };
+
+        // 配置 TCP keepalive 参数
+        let keepalive = TcpKeepalive::new()
+            // 设置空闲多久后开始发送 keepalive 探测包
+            .with_time(self.idle_timeout)
+            // 设置探测包之间的间隔（例如：每 10 秒发送一次）
+            .with_interval(Duration::from_secs(10));
+
+        // 在不同平台上设置探测次数
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let keepalive = keepalive.with_retries(3);  // 3 次探测失败后断开连接
+
+        // 应用 keepalive 设置
+        socket.set_tcp_keepalive(&keepalive)?;
+
+        // 重要：需要 forget socket，避免它被 drop 时关闭文件描述符
+        std::mem::forget(socket);
+
+        Ok(())
+    }
+
     pub async fn handle_connection(&self, mut client_stream: TcpStream, client_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // 为客户端连接配置 keepalive
+        if let Err(e) = self.configure_tcp_keepalive(&client_stream) {
+            warn!("配置客户端 TCP keepalive 失败: {}", e);
+        }
+
         // 选择后端服务器
         let backend = match self.load_balancer.select_backend() {
             Some(backend) => backend,
@@ -119,6 +168,11 @@ impl ProxyHandler {
 
         let mut backend_stream = backend_stream;
 
+        // 为后端连接配置 keepalive
+        if let Err(e) = self.configure_tcp_keepalive(&backend_stream) {
+            warn!("配置后端 TCP keepalive 失败: {}", e);
+        }
+
         // 如果启用了 PROXY Protocol，发送头部信息
         if self.enable_proxy_protocol {
             let proxy_header = ProxyHeader {
@@ -144,30 +198,14 @@ impl ProxyHandler {
         Ok(())
     }
 
-    /// 使用 copy_bidirectional 数据转发
+    /// 使用 copy_bidirectional 数据转发，通过 TCP keepalive 实现空闲超时
     async fn relay_data(&self, mut client_stream: TcpStream, mut backend_stream: TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let client_addr = client_stream.peer_addr().ok();
         let backend_addr = backend_stream.peer_addr().ok();
 
         info!("开始数据转发: {:?} <-> {:?}", client_addr, backend_addr);
 
-        // 使用 copy_bidirectional 进行双向数据拷贝
-        let result = if self.rw_timeout.as_secs() == 0 {
-            // 如果没有设置超时，直接使用 copy_bidirectional
-            tokio::io::copy_bidirectional(&mut client_stream, &mut backend_stream).await
-        } else {
-            // 如果设置了超时，使用 timeout 包装
-            match timeout(
-                self.rw_timeout,
-                tokio::io::copy_bidirectional(&mut client_stream, &mut backend_stream)
-            ).await {
-                Ok(result) => result,
-                Err(_) => {
-                    warn!("数据转发超时: {:?} <-> {:?}", client_addr, backend_addr);
-                    return Err("数据转发超时".into());
-                }
-            }
-        };
+        let result = tokio::io::copy_bidirectional(&mut client_stream, &mut backend_stream).await;
 
         match result {
             Ok((client_to_backend, backend_to_client)) => {
@@ -177,11 +215,11 @@ impl ProxyHandler {
                 );
             }
             Err(e) => {
-                // e.kind() == std::io::ErrorKind::UnexpectedEof ||
-                //                     e.kind() == std::io::ErrorKind::ConnectionAborted ||
-                //                     e.kind() == std::io::ErrorKind::ConnectionReset
-
-                warn!("连接意外关闭: {:?} <-> {:?}, 错误: {}", client_addr, backend_addr, e);
+                if e.kind() == std::io::ErrorKind::TimedOut {
+                    info!("连接因空闲超时而关闭: {:?} <-> {:?}", client_addr, backend_addr);
+                } else {
+                    warn!("连接意外关闭: {:?} <-> {:?}, 错误: {}", client_addr, backend_addr, e);
+                }
             }
         }
 
@@ -199,7 +237,7 @@ impl Clone for ProxyHandler {
             load_balancer: Arc::clone(&self.load_balancer),
             enable_proxy_protocol: self.enable_proxy_protocol,
             connect_timeout: self.connect_timeout,
-            rw_timeout: self.rw_timeout,
+            idle_timeout: self.idle_timeout,
             tcp_listener: Arc::clone(&self.tcp_listener),
             active_connections: Arc::clone(&self.active_connections),
             max_connections: self.max_connections,

@@ -72,8 +72,8 @@ pub struct GlobalConfig {
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout: u64,
     /// 读写超时时间（秒）
-    #[serde(default = "default_rw_timeout")]
-    pub read_write_timeout: u64,
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout: u64,
     /// 最大并发连接数
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
@@ -83,7 +83,7 @@ pub struct GlobalConfig {
 fn default_proxy_protocol() -> bool { true }
 fn default_weight() -> u32 { 1 }
 fn default_connect_timeout() -> u64 { 10 }
-fn default_rw_timeout() -> u64 { 30 }
+fn default_idle_timeout() -> u64 { 300 }
 fn default_max_connections() -> usize { 1000 }
 fn default_udp_session_timeout() -> u64 { 300 }
 fn default_udp_buffer_size() -> usize { 65536 }
