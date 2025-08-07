@@ -59,16 +59,6 @@ pub struct BackendConfig {
     pub weight: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthCheckConfig {
-    /// 检查间隔（秒）
-    #[serde(default = "default_interval")]
-    pub interval: u64,
-    /// 超时时间（秒）
-    #[serde(default = "default_timeout")]
-    pub timeout: u64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum LoadBalanceStrategy {
     RoundRobin,
@@ -92,8 +82,6 @@ pub struct GlobalConfig {
 // 默认值函数
 fn default_proxy_protocol() -> bool { true }
 fn default_weight() -> u32 { 1 }
-fn default_interval() -> u64 { 30 }
-fn default_timeout() -> u64 { 5 }
 fn default_connect_timeout() -> u64 { 10 }
 fn default_rw_timeout() -> u64 { 30 }
 fn default_max_connections() -> usize { 1000 }
