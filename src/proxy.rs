@@ -95,12 +95,13 @@ impl ProxyHandler {
         }
     }
 
-    pub async fn handle_connection(&self, client_stream: TcpStream, client_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn handle_connection(&self, mut client_stream: TcpStream, client_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // 选择后端服务器
         let backend = match self.load_balancer.select_backend() {
             Some(backend) => backend,
             None => {
-                error!("没有可用的后端服务器");
+                error!("没有可用的后端服务器，关闭客户端连接: {}", client_addr);
+                let _ = client_stream.shutdown().await;
                 return Ok(());
             }
         };
@@ -114,11 +115,13 @@ impl ProxyHandler {
         ).await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                error!("连接后端服务器失败 {}: {}", backend.address, e);
+                error!("连接后端服务器失败 {}: {}，关闭客户端连接: {}", backend.address, e, client_addr);
+                let _ = client_stream.shutdown().await;
                 return Ok(());
             }
             Err(_) => {
-                error!("连接后端服务器超时: {}", backend.address);
+                error!("连接后端服务器超时: {}，关闭客户端连接: {}", backend.address, client_addr);
+                let _ = client_stream.shutdown().await;
                 return Ok(());
             }
         };
@@ -135,7 +138,9 @@ impl ProxyHandler {
 
             let header_bytes = ProxyProtocolV2::generate_header(&proxy_header);
             if let Err(e) = backend_stream.write_all(&header_bytes).await {
-                error!("发送 PROXY Protocol 头部失败: {}", e);
+                error!("发送 PROXY Protocol 头部失败: {}，关闭连接", e);
+                let _ = client_stream.shutdown().await;
+                let _ = backend_stream.shutdown().await;
                 return Ok(());
             }
         }
@@ -149,6 +154,9 @@ impl ProxyHandler {
     }
 
     async fn relay_data(&self, client_stream: TcpStream, backend_stream: TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let client_addr = client_stream.peer_addr().ok();
+        let backend_addr = backend_stream.peer_addr().ok();
+
         let (mut client_read, mut client_write) = client_stream.into_split();
         let (mut backend_read, mut backend_write) = backend_stream.into_split();
 
@@ -157,7 +165,11 @@ impl ProxyHandler {
             let mut buffer = [0; 8192];
             loop {
                 match timeout(self.rw_timeout, client_read.read(&mut buffer)).await {
-                    Ok(Ok(0)) => break, // 连接关闭
+                    Ok(Ok(0)) => {
+                        // 客户端关闭连接
+                        info!("客户端关闭连接: {:?}", client_addr);
+                        break;
+                    }
                     Ok(Ok(n)) => {
                         if let Err(e) = timeout(self.rw_timeout, backend_write.write_all(&buffer[..n])).await {
                             error!("写入后端数据失败: {:?}", e);
@@ -174,13 +186,19 @@ impl ProxyHandler {
                     }
                 }
             }
+            // 关闭到后端的写连接
+            let _ = backend_write.shutdown().await;
         };
 
         let backend_to_client = async {
             let mut buffer = [0; 8192];
             loop {
                 match timeout(self.rw_timeout, backend_read.read(&mut buffer)).await {
-                    Ok(Ok(0)) => break, // 连接关闭
+                    Ok(Ok(0)) => {
+                        // 后端关闭连接
+                        info!("后端关闭连接: {:?}", backend_addr);
+                        break;
+                    }
                     Ok(Ok(n)) => {
                         if let Err(e) = timeout(self.rw_timeout, client_write.write_all(&buffer[..n])).await {
                             error!("写入客户端数据失败: {:?}", e);
@@ -197,6 +215,8 @@ impl ProxyHandler {
                     }
                 }
             }
+            // 关闭到客户端的写连接
+            let _ = client_write.shutdown().await;
         };
 
         // 等待任一方向的数据传输完成
@@ -205,6 +225,7 @@ impl ProxyHandler {
             _ = backend_to_client => {},
         }
 
+        info!("数据转发结束: {:?} <-> {:?}", client_addr, backend_addr);
         Ok(())
     }
 }
