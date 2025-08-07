@@ -3,7 +3,7 @@
 global:
   connect_timeout: 10        # 连接超时时间（秒）
   read_write_timeout: 30     # 读写超时时间（秒）
-  max_connections: 1000      # 最大并发连接数
+  max_connections: 1000      # 最大并发连接数, 0为无限制
 
 # 监听器配置 | Listener Configuration
 listeners:

@@ -18,7 +18,7 @@ pub struct ProxyHandler {
     tcp_listener: Arc<TcpListener>,
     // 连接计数器
     active_connections: Arc<AtomicUsize>,
-    // 最大连接数
+    // 最大连接数，0 表示不限制
     max_connections: usize,
 }
 
@@ -33,7 +33,13 @@ impl ProxyHandler {
         max_connections: usize,
     ) -> Result<Self> {
         let listener = TcpListener::bind(bind_addr).await?;
-        info!("TCP 代理服务器启动，监听地址: {}, 最大连接数: {}", bind_addr, max_connections);
+
+        // 根据 max_connections 的值显示不同的日志信息
+        if max_connections == 0 {
+            info!("TCP 代理服务器启动，监听地址: {}, 连接数: 无限制", bind_addr);
+        } else {
+            info!("TCP 代理服务器启动，监听地址: {}, 最大连接数: {}", bind_addr, max_connections);
+        }
 
         Ok(Self {
             load_balancer: Arc::new(LoadBalancer::new(backends, strategy)),
@@ -50,27 +56,37 @@ impl ProxyHandler {
         loop {
             match self.tcp_listener.accept().await {
                 Ok((stream, addr)) => {
-                    // 检查当前连接数是否超过限制
-                    let current_connections = self.active_connections.load(Ordering::Relaxed);
-                    if current_connections >= self.max_connections {
-                        warn!("达到最大连接数限制 ({}), 拒绝新连接 {}", self.max_connections, addr);
-                        // 直接关闭连接，不处理
-                        drop(stream);
-                        continue;
-                    }
-
-                    // 增加连接计数
-                    self.active_connections.fetch_add(1, Ordering::Relaxed);
-
-                    let handler = self.clone();
-                    tokio::spawn(async move {
-                        // 使用 ConnectionGuard 确保连接结束时减少计数
-                        let _guard = ConnectionGuard::new(Arc::clone(&handler.active_connections));
-
-                        if let Err(e) = handler.handle_connection(stream, addr).await {
-                            error!("处理 TCP 连接失败: {}", e);
+                    // 只有当 max_connections > 0 时才进行连接数管理
+                    if self.max_connections > 0 {
+                        let current_connections = self.active_connections.load(Ordering::Relaxed);
+                        if current_connections >= self.max_connections {
+                            warn!("达到最大连接数限制 ({}), 拒绝新连接 {}", self.max_connections, addr);
+                            // 直接关闭连接，不处理
+                            drop(stream);
+                            continue;
                         }
-                    });
+
+                        // 增加连接计数
+                        self.active_connections.fetch_add(1, Ordering::Relaxed);
+
+                        let handler = self.clone();
+                        tokio::spawn(async move {
+                            // 使用 ConnectionGuard 确保连接结束时减少计数
+                            let _guard = ConnectionGuard::new(Arc::clone(&handler.active_connections));
+
+                            if let Err(e) = handler.handle_connection(stream, addr).await {
+                                error!("处理 TCP 连接失败: {}", e);
+                            }
+                        });
+                    } else {
+                        // max_connections 为 0，不限制连接数，也不维护计数器
+                        let handler = self.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handler.handle_connection(stream, addr).await {
+                                error!("处理 TCP 连接失败: {}", e);
+                            }
+                        });
+                    }
                 }
                 Err(e) => {
                     error!("接受 TCP 连接失败: {}", e);
