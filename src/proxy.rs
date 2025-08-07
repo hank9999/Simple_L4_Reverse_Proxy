@@ -215,10 +215,28 @@ impl ProxyHandler {
                 );
             }
             Err(e) => {
-                if e.kind() == std::io::ErrorKind::TimedOut {
-                    info!("连接因空闲超时而关闭: {:?} <-> {:?}", client_addr, backend_addr);
-                } else {
-                    warn!("连接意外关闭: {:?} <-> {:?}, 错误: {}", client_addr, backend_addr, e);
+                match e.kind() {
+                    std::io::ErrorKind::UnexpectedEof => {
+                        info!("对端关闭了连接: {:?} <-> {:?}", client_addr, backend_addr);
+                    }
+                    std::io::ErrorKind::ConnectionReset => {
+                        info!("连接被重置: {:?} <-> {:?}", client_addr, backend_addr);
+                    }
+                    std::io::ErrorKind::ConnectionAborted => {
+                        info!("连接被中止: {:?} <-> {:?}", client_addr, backend_addr);
+                    }
+                    std::io::ErrorKind::TimedOut => {
+                        info!("连接因空闲超时而关闭: {:?} <-> {:?}", client_addr, backend_addr);
+                    }
+                    std::io::ErrorKind::ConnectionRefused => {
+                        warn!("连接被拒绝: {:?} <-> {:?}", client_addr, backend_addr);
+                    }
+                    std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable => {
+                        warn!("主机或网络不可达: {:?} <-> {:?}", client_addr, backend_addr);
+                    }
+                    _ => {
+                        warn!("连接意外关闭: {:?} <-> {:?}, 错误: {}", client_addr, backend_addr, e);
+                    }
                 }
             }
         }
