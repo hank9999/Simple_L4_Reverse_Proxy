@@ -57,36 +57,27 @@ impl ProxyHandler {
             match self.tcp_listener.accept().await {
                 Ok((stream, addr)) => {
                     // 只有当 max_connections > 0 时才进行连接数管理
-                    if self.max_connections > 0 {
+                    let use_connection_limit = self.max_connections > 0;
+                    if use_connection_limit {
                         let current_connections = self.active_connections.load(Ordering::Relaxed);
                         if current_connections >= self.max_connections {
                             warn!("达到最大连接数限制 ({}), 拒绝新连接 {}", self.max_connections, addr);
-                            // 直接关闭连接，不处理
                             drop(stream);
                             continue;
                         }
-
-                        // 增加连接计数
                         self.active_connections.fetch_add(1, Ordering::Relaxed);
-
-                        let handler = self.clone();
-                        tokio::spawn(async move {
-                            // 使用 ConnectionGuard 确保连接结束时减少计数
-                            let _guard = ConnectionGuard::new(Arc::clone(&handler.active_connections));
-
-                            if let Err(e) = handler.handle_connection(stream, addr).await {
-                                error!("处理 TCP 连接失败: {}", e);
-                            }
-                        });
-                    } else {
-                        // max_connections 为 0，不限制连接数，也不维护计数器
-                        let handler = self.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = handler.handle_connection(stream, addr).await {
-                                error!("处理 TCP 连接失败: {}", e);
-                            }
-                        });
                     }
+                    let handler = self.clone();
+                    tokio::spawn(async move {
+                        // 使用 ConnectionGuard 确保连接结束时减少计数
+                        let _guard = use_connection_limit.then(||
+                            ConnectionGuard::new(Arc::clone(&handler.active_connections))
+                        );
+
+                        if let Err(e) = handler.handle_connection(stream, addr).await {
+                            error!("处理 TCP 连接失败: {}", e);
+                        }
+                    });
                 }
                 Err(e) => {
                     error!("接受 TCP 连接失败: {}", e);
