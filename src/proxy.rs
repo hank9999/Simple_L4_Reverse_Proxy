@@ -2,6 +2,7 @@ use crate::config::{BackendConfig, LoadBalanceStrategy};
 use crate::protocol::{ProxyProtocolV2, ProxyHeader, Protocol};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, TcpListener};
 use tokio::time::{timeout, Duration};
@@ -15,6 +16,10 @@ pub struct ProxyHandler {
     connect_timeout: Duration,
     rw_timeout: Duration,
     tcp_listener: Arc<TcpListener>,
+    // 连接计数器
+    active_connections: Arc<AtomicUsize>,
+    // 最大连接数
+    max_connections: usize,
 }
 
 impl ProxyHandler {
@@ -25,9 +30,10 @@ impl ProxyHandler {
         enable_proxy_protocol: bool,
         connect_timeout: Duration,
         rw_timeout: Duration,
+        max_connections: usize,
     ) -> Result<Self> {
         let listener = TcpListener::bind(bind_addr).await?;
-        info!("TCP 代理服务器启动，监听地址: {}", bind_addr);
+        info!("TCP 代理服务器启动，监听地址: {}, 最大连接数: {}", bind_addr, max_connections);
 
         Ok(Self {
             load_balancer: Arc::new(LoadBalancer::new(backends, strategy)),
@@ -35,6 +41,8 @@ impl ProxyHandler {
             connect_timeout,
             rw_timeout,
             tcp_listener: Arc::new(listener),
+            active_connections: Arc::new(AtomicUsize::new(0)),
+            max_connections,
         })
     }
 
@@ -42,8 +50,23 @@ impl ProxyHandler {
         loop {
             match self.tcp_listener.accept().await {
                 Ok((stream, addr)) => {
+                    // 检查当前连接数是否超过限制
+                    let current_connections = self.active_connections.load(Ordering::Relaxed);
+                    if current_connections >= self.max_connections {
+                        warn!("达到最大连接数限制 ({}), 拒绝新连接 {}", self.max_connections, addr);
+                        // 直接关闭连接，不处理
+                        drop(stream);
+                        continue;
+                    }
+
+                    // 增加连接计数
+                    self.active_connections.fetch_add(1, Ordering::Relaxed);
+
                     let handler = self.clone();
                     tokio::spawn(async move {
+                        // 使用 ConnectionGuard 确保连接结束时减少计数
+                        let _guard = ConnectionGuard::new(Arc::clone(&handler.active_connections));
+
                         if let Err(e) = handler.handle_connection(stream, addr).await {
                             error!("处理 TCP 连接失败: {}", e);
                         }
@@ -178,6 +201,25 @@ impl Clone for ProxyHandler {
             connect_timeout: self.connect_timeout,
             rw_timeout: self.rw_timeout,
             tcp_listener: Arc::clone(&self.tcp_listener),
+            active_connections: Arc::clone(&self.active_connections),
+            max_connections: self.max_connections,
         }
+    }
+}
+
+/// RAII 结构，确保连接结束时自动减少计数
+struct ConnectionGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl ConnectionGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        Self { counter }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
     }
 }
