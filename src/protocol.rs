@@ -1,5 +1,6 @@
 use bytes::{Bytes, BytesMut, BufMut};
 use std::net::SocketAddr;
+use tracing::warn;
 
 /// PROXY Protocol v2 实现
 pub struct ProxyProtocolV2;
@@ -25,6 +26,7 @@ impl ProxyProtocolV2 {
     pub fn generate_header(header: &ProxyHeader) -> Bytes {
         // 提前判断非同栈, 非同栈不符合规定, 不发送Proxy Protocol v2包
         if header.src_addr.is_ipv4() != header.dst_addr.is_ipv4() {
+            warn!("协议栈不匹配：源地址 {:?} 和目标地址 {:?} 使用了不同的 IP 版本", header.src_addr, header.dst_addr);
             return Bytes::new();
         }
 
