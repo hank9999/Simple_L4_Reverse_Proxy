@@ -144,79 +144,51 @@ impl ProxyHandler {
         Ok(())
     }
 
-    async fn relay_data(&self, client_stream: TcpStream, backend_stream: TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// 使用 copy_bidirectional 数据转发
+    async fn relay_data(&self, mut client_stream: TcpStream, mut backend_stream: TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let client_addr = client_stream.peer_addr().ok();
         let backend_addr = backend_stream.peer_addr().ok();
 
-        let (mut client_read, mut client_write) = client_stream.into_split();
-        let (mut backend_read, mut backend_write) = backend_stream.into_split();
+        info!("开始数据转发: {:?} <-> {:?}", client_addr, backend_addr);
 
-        // 双向数据转发
-        let client_to_backend = async {
-            let mut buffer = [0; 8192];
-            loop {
-                match timeout(self.rw_timeout, client_read.read(&mut buffer)).await {
-                    Ok(Ok(0)) => {
-                        // 客户端关闭连接
-                        info!("客户端关闭连接: {:?}", client_addr);
-                        break;
-                    }
-                    Ok(Ok(n)) => {
-                        if let Err(e) = timeout(self.rw_timeout, backend_write.write_all(&buffer[..n])).await {
-                            error!("写入后端数据失败: {:?}", e);
-                            break;
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        error!("读取客户端数据失败: {}", e);
-                        break;
-                    }
-                    Err(_) => {
-                        warn!("读取客户端数据超时");
-                        break;
-                    }
+        // 使用 copy_bidirectional 进行双向数据拷贝
+        let result = if self.rw_timeout.as_secs() == 0 {
+            // 如果没有设置超时，直接使用 copy_bidirectional
+            tokio::io::copy_bidirectional(&mut client_stream, &mut backend_stream).await
+        } else {
+            // 如果设置了超时，使用 timeout 包装
+            match timeout(
+                self.rw_timeout,
+                tokio::io::copy_bidirectional(&mut client_stream, &mut backend_stream)
+            ).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("数据转发超时: {:?} <-> {:?}", client_addr, backend_addr);
+                    return Err("数据转发超时".into());
                 }
             }
-            // 关闭到后端的写连接
-            let _ = backend_write.shutdown().await;
         };
 
-        let backend_to_client = async {
-            let mut buffer = [0; 8192];
-            loop {
-                match timeout(self.rw_timeout, backend_read.read(&mut buffer)).await {
-                    Ok(Ok(0)) => {
-                        // 后端关闭连接
-                        info!("后端关闭连接: {:?}", backend_addr);
-                        break;
-                    }
-                    Ok(Ok(n)) => {
-                        if let Err(e) = timeout(self.rw_timeout, client_write.write_all(&buffer[..n])).await {
-                            error!("写入客户端数据失败: {:?}", e);
-                            break;
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        error!("读取后端数据失败: {}", e);
-                        break;
-                    }
-                    Err(_) => {
-                        warn!("读取后端数据超时");
-                        break;
-                    }
-                }
+        match result {
+            Ok((client_to_backend, backend_to_client)) => {
+                info!(
+                    "数据转发完成: {:?} <-> {:?}, 客户端->后端: {} bytes, 后端->客户端: {} bytes",
+                    client_addr, backend_addr, client_to_backend, backend_to_client
+                );
             }
-            // 关闭到客户端的写连接
-            let _ = client_write.shutdown().await;
-        };
+            Err(e) => {
+                // e.kind() == std::io::ErrorKind::UnexpectedEof ||
+                //                     e.kind() == std::io::ErrorKind::ConnectionAborted ||
+                //                     e.kind() == std::io::ErrorKind::ConnectionReset
 
-        // 等待任一方向的数据传输完成
-        tokio::select! {
-            _ = client_to_backend => {},
-            _ = backend_to_client => {},
+                warn!("连接意外关闭: {:?} <-> {:?}, 错误: {}", client_addr, backend_addr, e);
+            }
         }
 
-        info!("数据转发结束: {:?} <-> {:?}", client_addr, backend_addr);
+        // 确保连接正确关闭
+        let _ = client_stream.shutdown().await;
+        let _ = backend_stream.shutdown().await;
+
         Ok(())
     }
 }
