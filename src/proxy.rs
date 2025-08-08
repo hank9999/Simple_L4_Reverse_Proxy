@@ -17,6 +17,7 @@ pub struct ProxyHandler {
     connect_timeout: Duration,
     idle_timeout: Duration,
     tcp_listener: Arc<TcpListener>,
+    bind_addr: SocketAddr,
     // 连接计数器
     active_connections: Arc<AtomicUsize>,
     // 最大连接数，0 表示不限制
@@ -48,6 +49,7 @@ impl ProxyHandler {
             connect_timeout,
             idle_timeout,
             tcp_listener: Arc::new(listener),
+            bind_addr,
             active_connections: Arc::new(AtomicUsize::new(0)),
             max_connections,
         })
@@ -158,9 +160,12 @@ impl ProxyHandler {
 
         // 如果启用了 PROXY Protocol，发送头部信息
         if self.enable_proxy_protocol {
+            // 尝试获取客户端连接的本地地址，失败则使用绑定地址
+            let dst_addr = client_stream.local_addr().unwrap_or(self.bind_addr);
+
             let proxy_header = ProxyHeader {
                 src_addr: client_addr,
-                dst_addr: backend.address,
+                dst_addr,
                 protocol: Protocol::TCP,
             };
 
@@ -240,6 +245,7 @@ impl Clone for ProxyHandler {
             connect_timeout: self.connect_timeout,
             idle_timeout: self.idle_timeout,
             tcp_listener: Arc::clone(&self.tcp_listener),
+            bind_addr: self.bind_addr,
             active_connections: Arc::clone(&self.active_connections),
             max_connections: self.max_connections,
         }
