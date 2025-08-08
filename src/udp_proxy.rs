@@ -159,10 +159,11 @@ impl UdpProxyHandler {
         // 启动后端响应处理任务
         let client_socket = Arc::clone(&self.client_socket);
         let sessions = Arc::clone(&self.sessions);
-        let session_timeout = Duration::from_secs(self.config.session_timeout); // 使用配置的会话超时
+        let session_timeout = Duration::from_secs(self.config.session_timeout);
+        let buffer_size = self.config.buffer_size;
 
         tokio::spawn(async move {
-            let mut buffer = vec![0u8; 65536]; // UDP 最大包大小
+            let mut buffer = vec![0u8; buffer_size]; // 使用配置的缓冲区大小
             loop {
                 match timeout(session_timeout, backend_socket.recv(&mut buffer)).await {
                     Ok(Ok(len)) => {
