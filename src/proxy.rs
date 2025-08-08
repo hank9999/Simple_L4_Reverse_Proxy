@@ -94,21 +94,7 @@ impl ProxyHandler {
             return Ok(());
         }
 
-        // 获取底层 socket
-        let socket = unsafe {
-            // 获取原始 socket 文件描述符
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::AsRawFd;
-                Socket::from_raw_fd(stream.as_raw_fd())
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::io::AsRawSocket;
-                use std::os::windows::io::FromRawSocket;
-                Socket::from_raw_socket(stream.as_raw_socket())
-            }
-        };
+        let socket = socket2::SockRef::from(stream);
 
         // 配置 TCP keepalive 参数
         let keepalive = TcpKeepalive::new()
@@ -123,9 +109,6 @@ impl ProxyHandler {
 
         // 应用 keepalive 设置
         socket.set_tcp_keepalive(&keepalive)?;
-
-        // 重要：需要 forget socket，避免它被 drop 时关闭文件描述符
-        std::mem::forget(socket);
 
         Ok(())
     }
