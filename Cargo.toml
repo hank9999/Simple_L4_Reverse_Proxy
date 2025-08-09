@@ -17,3 +17,4 @@ clap = { version = "4.0", features = ["derive"] }
 bytes = "1.0"
 dashmap = "5.0"
 socket2 = "0.6"
+tokio-util = "0.7"
