@@ -9,7 +9,7 @@ use tokio::time::{timeout, Duration};
 use tracing::{info, error, warn};
 use anyhow::Result;
 use crate::load_balancer::LoadBalancer;
-use socket2::{Socket, TcpKeepalive};
+use socket2::TcpKeepalive;
 
 pub struct ProxyHandler {
     load_balancer: Arc<LoadBalancer>,
