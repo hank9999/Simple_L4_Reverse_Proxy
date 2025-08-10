@@ -37,7 +37,6 @@ impl BufferPool {
 
     async fn acquire(&self) -> BytesMut {
         let mut rx = self.receiver.lock().await;
-        // 使用 try_recv 是合理的，因为我们不想等待
         // 如果池中没有可用缓冲区，立即创建新的
         match rx.try_recv() {
             Ok(mut buffer) => {
@@ -140,18 +139,18 @@ impl UdpProxyHandler {
                             let handler = self.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handler.handle_packet(client_addr, data).await {
-                                    error!("处理UDP数据包失败: {}", e);
+                                    error!("处理 UDP 数据包失败: {}", e);
                                 }
                             });
                         }
                         Err(e) => {
-                            error!("接收UDP数据包失败: {}", e);
+                            error!("接收 UDP 数据包失败: {}", e);
                             self.buffer_pool.release(buffer);
                         }
                     }
                 }
                 _ = self.shutdown_token.cancelled() => {
-                    info!("UDP代理服务器正在关闭...");
+                    info!("UDP 代理服务器正在关闭...");
                     break;
                 }
             }
@@ -184,7 +183,7 @@ impl UdpProxyHandler {
                             if let Some((_, session)) = sessions.remove(&client_addr) {
                                 // 只需取消任务即可，后台任务会自动清理信号量和计数器
                                 session.cancel_token.cancel();
-                                debug!("通过清理任务关闭超时UDP会话: {}", client_addr);
+                                debug!("通过清理任务关闭超时 UDP 会话: {}", client_addr);
                             }
                         }
                     }
@@ -289,7 +288,7 @@ impl UdpProxyHandler {
         // 只有在所有操作成功并插入会话后，才消耗许可，防止其被归还
         std::mem::forget(permit);
 
-        info!("创建新UDP会话: {} -> {} (总会话数: {})", key, backend.address, self.session_count.load(Ordering::Relaxed));
+        info!("创建新 UDP 会话: {} -> {} (总会话数: {})", key, backend.address, self.session_count.load(Ordering::Relaxed));
         Ok(())
     }
 
@@ -344,7 +343,7 @@ impl UdpProxyHandler {
             if sessions.remove(&client_addr).is_some() {
                 session_count.fetch_sub(1, Ordering::Relaxed);
                 session_semaphore.add_permits(1); // 归还许可
-                info!("UDP会话关闭: {} <-> {} (剩余会话数: {})", client_addr, backend_addr, session_count.load(Ordering::Relaxed));
+                info!("UDP 会话关闭: {} <-> {} (剩余会话数: {})", client_addr, backend_addr, session_count.load(Ordering::Relaxed));
             }
         });
     }
