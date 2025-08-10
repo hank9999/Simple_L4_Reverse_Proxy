@@ -67,6 +67,7 @@ struct UdpSession {
 impl UdpSession {
     /// 更新活动时间戳
     fn update_activity(&self, epoch: Instant) {
+        // 截断没有问题 2^64-1毫秒 ==> 5.8亿年
         let elapsed_ms = epoch.elapsed().as_millis() as u64;
         self.last_activity_ms.store(elapsed_ms, Ordering::Relaxed);
     }
