@@ -16,7 +16,8 @@ use crate::load_balancer::LoadBalancer;
 use crate::protocol::{Protocol, ProxyHeader, ProxyProtocolV2};
 
 const BUFFER_POOL_SIZE: usize = 1024;
-const MAX_PACKET_SIZE: usize = 65535;
+// UDP 实际最大载荷大小（65535 - 8字节UDP头 - 20字节IP头）
+const MAX_PACKET_SIZE: usize = 65507;
 
 /// 缓冲池，用于复用内存以减少分配开销。
 struct BufferPool {
@@ -48,7 +49,8 @@ impl BufferPool {
     }
 
     fn release(&self, mut buffer: BytesMut) {
-        if buffer.capacity() <= self.buffer_size * 2 { // 避免缓冲区过度增长
+        // 只回收容量符合缓冲区（允许1KB的余量）
+        if buffer.capacity() <= self.buffer_size + 1024 {
             buffer.clear();
             // try_send 失败也无所谓，只是这个 buffer 被丢弃了而已
             let _ = self.pool.try_send(buffer);
@@ -261,10 +263,19 @@ impl UdpProxyHandler {
         if self.enable_proxy_protocol {
             let proxy_header = ProxyHeader { src_addr: *entry.key(), dst_addr: backend.address, protocol: Protocol::UDP };
             let header_bytes = ProxyProtocolV2::generate_header(&proxy_header);
-            let mut full_packet = BytesMut::with_capacity(header_bytes.len() + first_packet_data.len());
-            full_packet.extend_from_slice(&header_bytes);
-            full_packet.extend_from_slice(&first_packet_data);
-            backend_socket.send(&full_packet).await?;
+            
+            // 检查附加协议头后是否超过 UDP 最大载荷
+            let total_size = header_bytes.len() + first_packet_data.len();
+            if total_size > MAX_PACKET_SIZE {
+                warn!("附加协议头后超过 UDP 最大载荷限制: {} > {}", total_size, MAX_PACKET_SIZE);
+                // 发送原始数据，不加头部
+                backend_socket.send(&first_packet_data).await?;
+            } else {
+                let mut full_packet = BytesMut::with_capacity(total_size);
+                full_packet.extend_from_slice(&header_bytes);
+                full_packet.extend_from_slice(&first_packet_data);
+                backend_socket.send(&full_packet).await?;
+            }
         } else {
             backend_socket.send(&first_packet_data).await?;
         }
@@ -312,7 +323,8 @@ impl UdpProxyHandler {
         tokio::spawn(async move {
             loop {
                 let mut buffer = buffer_pool.acquire().await;
-                buffer.resize(MAX_PACKET_SIZE, 0);
+                // 使用与主循环相同的缓冲区大小
+                buffer.resize(buffer_pool.buffer_size.min(MAX_PACKET_SIZE), 0);
 
                 tokio::select! {
                     result = tokio::time::timeout(session_timeout, backend_socket.recv(&mut buffer)) => {
