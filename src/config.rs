@@ -48,6 +48,9 @@ pub struct UdpConfig {
     /// 最大会话数
     #[serde(default = "default_max_sessions")]
     pub max_sessions: usize,
+    /// 清理任务执行频率（秒）
+    #[serde(default = "default_cleanup_interval")]
+    pub cleanup_interval: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +91,7 @@ fn default_max_connections() -> usize { 1000 }
 fn default_udp_session_timeout() -> u64 { 300 }
 fn default_udp_buffer_size() -> usize { 65536 }
 fn default_max_sessions() -> usize { 10000 }
+fn default_cleanup_interval() -> u64 { 30 }
 
 impl Default for LoadBalanceStrategy {
     fn default() -> Self {

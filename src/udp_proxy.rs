@@ -162,11 +162,12 @@ impl UdpProxyHandler {
     fn start_cleanup_task(&self) {
         let sessions = Arc::clone(&self.sessions);
         let session_timeout = Duration::from_secs(self.config.session_timeout);
+        let cleanup_interval = Duration::from_secs(self.config.cleanup_interval);
         let shutdown_token = self.shutdown_token.clone();
         let epoch = self.epoch;
 
         tokio::spawn(async move {
-            let mut cleanup_interval = interval(Duration::from_secs(30));
+            let mut cleanup_interval = interval(cleanup_interval);
             loop {
                 tokio::select! {
                     _ = cleanup_interval.tick() => {

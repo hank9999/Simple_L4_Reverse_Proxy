@@ -67,6 +67,7 @@ impl ProxyServer {
             session_timeout: 300,
             buffer_size: 65536,
             max_sessions: 10000,
+            cleanup_interval: 30,
         });
 
         let udp_handler = UdpProxyHandler::new(
