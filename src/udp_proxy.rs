@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex, Semaphore, OwnedSemaphorePermit};
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -59,11 +59,12 @@ impl BufferPool {
 }
 
 /// UDP会话状态。
-#[derive(Debug)]
 struct UdpSession {
     backend_socket: Arc<UdpSocket>,
     last_activity_ms: AtomicU64,
     cancel_token: CancellationToken,
+    // SessionGuard，用于确保会话结束时自动减少计数
+    _guard: Option<SessionGuard>,
 }
 
 impl UdpSession {
@@ -89,8 +90,10 @@ pub struct UdpProxyHandler {
     config: UdpConfig,
     client_socket: Arc<UdpSocket>,
     buffer_pool: Arc<BufferPool>,
-    session_count: Arc<AtomicUsize>,
-    session_semaphore: Arc<Semaphore>,
+    // 活跃会话计数器
+    active_sessions: Arc<AtomicUsize>,
+    // 最大会话数，0 表示不限制
+    max_sessions: usize,
     shutdown_token: CancellationToken,
     // 启动时间戳
     epoch: Instant,
@@ -105,11 +108,17 @@ impl UdpProxyHandler {
         config: UdpConfig,
     ) -> Result<Self> {
         let client_socket = UdpSocket::bind(bind_addr).await?;
-        info!("UDP 代理服务器启动，监听地址: {}", bind_addr);
 
         let buffer_size = config.buffer_size.min(MAX_PACKET_SIZE);
         let buffer_pool = Arc::new(BufferPool::new(BUFFER_POOL_SIZE, buffer_size));
         let max_sessions = config.max_sessions;
+
+        // 根据 max_sessions 的值显示不同的日志信息
+        if max_sessions == 0 {
+            info!("UDP 代理服务器启动，监听地址: {}, 会话数: 无限制", bind_addr);
+        } else {
+            info!("UDP 代理服务器启动，监听地址: {}, 最大会话数: {}", bind_addr, max_sessions);
+        }
 
         Ok(Self {
             sessions: Arc::new(DashMap::new()),
@@ -118,8 +127,8 @@ impl UdpProxyHandler {
             config,
             client_socket: Arc::new(client_socket),
             buffer_pool,
-            session_count: Arc::new(AtomicUsize::new(0)),
-            session_semaphore: Arc::new(Semaphore::new(max_sessions)),
+            active_sessions: Arc::new(AtomicUsize::new(0)),
+            max_sessions,
             shutdown_token: CancellationToken::new(),
             epoch: Instant::now(),
         })
@@ -184,7 +193,7 @@ impl UdpProxyHandler {
 
                         for client_addr in expired_keys {
                             if let Some((_, session)) = sessions.remove(&client_addr) {
-                                // 只需取消任务即可，后台任务会自动清理信号量和计数器
+                                // 取消后台任务，SessionGuard 会自动处理计数器
                                 session.cancel_token.cancel();
                                 debug!("通过清理任务关闭超时 UDP 会话: {}", client_addr);
                             }
@@ -222,20 +231,26 @@ impl UdpProxyHandler {
 
     /// 原子性地创建会话并发送第一个数据包。
     async fn create_session_and_send(&self, client_addr: SocketAddr, data: Bytes) -> Result<()> {
-        // 1. 在操作 DashMap 之前，先获取许可。如果达到上限，这里会异步等待。
-        let permit = self.session_semaphore.clone().acquire_owned().await?;
-
-        // 2. 使用 Entry API 进行原子性检查和插入
+        // 使用 Entry API 进行原子性检查和插入
         match self.sessions.entry(client_addr) {
             Entry::Occupied(entry) => {
-                // 获取许可后，转发数据包即可，获得的许可会自动归还。
+                // 会话已存在，直接转发数据包
                 let session = entry.get();
                 session.update_activity(self.epoch);
                 session.backend_socket.send(&data).await?;
             }
             Entry::Vacant(entry) => {
-                // 创新新会话
-                if let Err(e) = self.build_and_launch_session(entry, permit, data).await {
+                // 检查是否达到最大会话数限制（只有当 max_sessions > 0 时才进行限制）
+                if self.max_sessions > 0 {
+                    let current_sessions = self.active_sessions.load(Ordering::Relaxed);
+                    if current_sessions >= self.max_sessions {
+                        warn!("UDP 达到最大会话数限制 ({}), 拒绝新会话 {}", self.max_sessions, client_addr);
+                        return Ok(());
+                    }
+                }
+                
+                // 创建新会话
+                if let Err(e) = self.build_and_launch_session(entry, data).await {
                     warn!("构建新会话失败 for {}: {}", client_addr, e);
                 }
             }
@@ -247,7 +262,6 @@ impl UdpProxyHandler {
     async fn build_and_launch_session<'a>(
         &self,
         entry: dashmap::mapref::entry::VacantEntry<'a, SocketAddr, Arc<UdpSession>>,
-        permit: OwnedSemaphorePermit,
         first_packet_data: Bytes,
     ) -> Result<()> {
         // 选择后端
@@ -280,12 +294,22 @@ impl UdpProxyHandler {
             backend_socket.send(&first_packet_data).await?;
         }
 
+        // 创建会话守卫（如果启用了会话限制）
+        let guard = if self.max_sessions > 0 {
+            // 增加活跃会话计数
+            self.active_sessions.fetch_add(1, Ordering::Relaxed);
+            Some(SessionGuard::new(Arc::clone(&self.active_sessions)))
+        } else {
+            None
+        };
+
         // 创建会话
         let cancel_token = CancellationToken::new();
         let new_session = Arc::new(UdpSession {
             backend_socket: Arc::clone(&backend_socket),
             last_activity_ms: AtomicU64::new(self.epoch.elapsed().as_millis() as u64),
             cancel_token: cancel_token.clone(),
+            _guard: guard,
         });
 
         // 启动后端响应处理任务
@@ -295,12 +319,9 @@ impl UdpProxyHandler {
 
         // 原子性地插入会话
         entry.insert(new_session);
-        self.session_count.fetch_add(1, Ordering::Relaxed);
 
-        // 只有在所有操作成功并插入会话后，才消耗许可，防止其被归还
-        std::mem::forget(permit);
-
-        info!("创建新 UDP 会话: {} -> {} (总会话数: {})", key, backend.address, self.session_count.load(Ordering::Relaxed));
+        let current_sessions = self.active_sessions.load(Ordering::Relaxed);
+        info!("创建新 UDP 会话: {} -> {} (总会话数: {})", key, backend.address, current_sessions);
         Ok(())
     }
 
@@ -315,8 +336,7 @@ impl UdpProxyHandler {
         let sessions = Arc::clone(&self.sessions);
         let buffer_pool = Arc::clone(&self.buffer_pool);
         let session_timeout = Duration::from_secs(self.config.session_timeout);
-        let session_count = Arc::clone(&self.session_count);
-        let session_semaphore = Arc::clone(&self.session_semaphore);
+        let active_sessions = Arc::clone(&self.active_sessions);
         let epoch = self.epoch;
         let client_addr = *client_addr;
 
@@ -352,11 +372,11 @@ impl UdpProxyHandler {
                 }
             }
 
-            // 任务结束后的统一清理逻辑
+            // 任务结束后的清理逻辑
             if sessions.remove(&client_addr).is_some() {
-                session_count.fetch_sub(1, Ordering::Relaxed);
-                session_semaphore.add_permits(1); // 归还许可
-                info!("UDP 会话关闭: {} <-> {} (剩余会话数: {})", client_addr, backend_addr, session_count.load(Ordering::Relaxed));
+                // SessionGuard 会在 drop 时自动减少计数器
+                let remaining_sessions = active_sessions.load(Ordering::Relaxed);
+                info!("UDP 会话关闭: {} <-> {} (剩余会话数: {})", client_addr, backend_addr, remaining_sessions);
             }
         });
     }
@@ -376,10 +396,27 @@ impl Clone for UdpProxyHandler {
             config: self.config.clone(),
             client_socket: Arc::clone(&self.client_socket),
             buffer_pool: Arc::clone(&self.buffer_pool),
-            session_count: Arc::clone(&self.session_count),
-            session_semaphore: Arc::clone(&self.session_semaphore),
+            active_sessions: Arc::clone(&self.active_sessions),
+            max_sessions: self.max_sessions,
             shutdown_token: self.shutdown_token.clone(),
             epoch: self.epoch,
         }
+    }
+}
+
+/// RAII 结构，确保会话结束时自动减少计数
+struct SessionGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl SessionGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        Self { counter }
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
     }
 }
