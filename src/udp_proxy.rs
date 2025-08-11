@@ -216,8 +216,9 @@ impl UdpProxyHandler {
             let session = entry.value();
             session.update_activity(self.epoch);
             if let Err(e) = session.backend_socket.send(&data).await {
-                error!("转发数据到后端失败: {}", e);
+                error!("转发数据到后端失败 for {}: {}", client_addr, e);
                 // 发送失败时，移除会话
+                // 后端连接失效，会话不可恢复
                 if let Some((_, session)) = self.sessions.remove(&client_addr) {
                     session.cancel_token.cancel();
                 }
@@ -354,11 +355,15 @@ impl UdpProxyHandler {
                                 if let Some(session) = sessions.get(&client_addr) {
                                     session.update_activity(epoch);
                                 }
-                                if client_socket.send_to(&buffer[..len], client_addr).await.is_err() {
+                                if let Err(e) = client_socket.send_to(&buffer[..len], client_addr).await {
+                                    error!("发送数据到客户端失败 for {}: {}", client_addr, e);
                                     break; // 发送给客户端失败，关闭会话
                                 }
                             }
-                            Ok(Err(_)) => break, // 从后端接收失败，关闭会话
+                            Ok(Err(e)) => {
+                                error!("从后端接收数据失败 for {}: {}", client_addr, e);
+                                break; // 从后端接收失败，关闭会话
+                            }
                             Err(_) => { // 接收超时
                                 debug!("后端响应超时，关闭会话 for {}", client_addr);
                                 break;
