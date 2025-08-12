@@ -1,19 +1,9 @@
 # config.yaml - 示例配置文件 | Example configuration file
 # 全局配置 | Global Configuration
-# 配置说明:
-# - idle_timeout: 空闲超时通过TCP keepalive实现
-#   * 0: 不启用keepalive检测
-#   * >0: 启用keepalive，连接空闲指定秒数后开始检测
-#   * Linux下实际超时时间约为: idle_timeout + (idle_timeout/3 * 3)
-#   * 例如300秒配置，实际约600秒后连接会被关闭
-# - max_connections:
-#   * 0: 无限制
-#   * >0: 限制最大并发连接数
 global:
   connect_timeout: 10        # 连接超时时间（秒）
-  idle_timeout: 300          # 空闲超时时间（秒），0为不启用keepalive超时检测
+  idle_timeout: 300          # 空闲超时时间（秒），0为不启用keepalive超时检测，Linux下实际超时时间约为: idle_timeout + (idle_timeout/3 * 3)。
   max_connections: 1000      # 最大并发连接数, 0为无限制
-  cleanup_interval: 30       # UDP 会话清理检查间隔, 默认30秒
 
 # 监听器配置 | Listener Configuration
 listeners:
@@ -44,6 +34,7 @@ listeners:
       session_timeout: 60      # UDP 会话超时时间（秒）
       buffer_size: 4096        # UDP 缓冲区大小
       max_sessions: 1000       # 最大会话数
+      cleanup_interval: 30     # UDP 会话清理检查间隔, 默认30秒
 
   # 游戏服务器 UDP 代理 | Game Server UDP Proxy
   - bind: "0.0.0.0:7777"
@@ -56,5 +47,6 @@ listeners:
         weight: 1
     udp_config:
       session_timeout: 1800    # 30分钟会话超时
-      buffer_size: 65536       # 64KB 缓冲区
+      buffer_size: 32768       # 32KB 缓冲区
       max_sessions: 5000       # 支持更多会话
+      cleanup_interval: 30     # UDP 会话清理检查间隔, 默认30秒
