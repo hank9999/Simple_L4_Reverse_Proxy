@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, TcpListener};
 use tokio::time::{timeout, Duration};
-use tracing::{info, error, warn};
+use tracing::{info, error, warn, debug};
 use anyhow::Result;
 use crate::load_balancer::LoadBalancer;
 use socket2::TcpKeepalive;
@@ -191,13 +191,13 @@ impl ProxyHandler {
         let client_addr = client_stream.peer_addr().ok();
         let backend_addr = backend_stream.peer_addr().ok();
 
-        info!("开始数据转发: {:?} <-> {:?}", client_addr, backend_addr);
+        debug!("开始数据转发: {:?} <-> {:?}", client_addr, backend_addr);
 
         let result = tokio::io::copy_bidirectional(&mut client_stream, &mut backend_stream).await;
 
         match result {
             Ok((client_to_backend, backend_to_client)) => {
-                info!(
+                debug!(
                     "数据转发完成: {:?} <-> {:?}, 客户端->后端: {} bytes, 后端->客户端: {} bytes",
                     client_addr, backend_addr, client_to_backend, backend_to_client
                 );
