@@ -232,39 +232,61 @@ impl UdpProxyHandler {
 
     /// 原子性地创建会话并发送第一个数据包。
     async fn create_session_and_send(&self, client_addr: SocketAddr, data: Bytes) -> Result<()> {
-        // 使用 Entry API 进行原子性检查和插入
+        // 快速路径：检查会话是否已存在
+        if let Some(session) = self.sessions.get(&client_addr) {
+            session.update_activity(self.epoch);
+            session.backend_socket.send(&data).await?;
+            return Ok(());
+        }
+
+        // 慢路径：需要创建新会话
+        // 检查是否达到最大会话数限制（只有当 max_sessions > 0 时才进行限制）
+        if self.max_sessions > 0 {
+            let current_sessions = self.active_sessions.load(Ordering::Relaxed);
+            if current_sessions >= self.max_sessions {
+                warn!("UDP 达到最大会话数限制 ({}), 拒绝新会话 {}", self.max_sessions, client_addr);
+                return Ok(());
+            }
+        }
+
+        // 先准备会话（不持有锁）
+        let prepared_session = self.prepare_session().await?;
+        
+        // 使用 Entry API 进行原子性插入
         match self.sessions.entry(client_addr) {
             Entry::Occupied(entry) => {
-                // 会话已存在，直接转发数据包
+                // 在准备期间另一个线程已经创建了会话，使用现有会话
                 let session = entry.get();
                 session.update_activity(self.epoch);
                 session.backend_socket.send(&data).await?;
+                // 取消准备的会话
+                prepared_session.cancel_token.cancel();
             }
             Entry::Vacant(entry) => {
-                // 检查是否达到最大会话数限制（只有当 max_sessions > 0 时才进行限制）
-                if self.max_sessions > 0 {
-                    let current_sessions = self.active_sessions.load(Ordering::Relaxed);
-                    if current_sessions >= self.max_sessions {
-                        warn!("UDP 达到最大会话数限制 ({}), 拒绝新会话 {}", self.max_sessions, client_addr);
-                        return Ok(());
-                    }
+                // 发送第一个数据包
+                if let Err(e) = self.send_first_packet(&prepared_session.backend_socket, client_addr, &data).await {
+                    prepared_session.cancel_token.cancel();
+                    return Err(e);
                 }
                 
-                // 创建新会话
-                if let Err(e) = self.build_and_launch_session(entry, data).await {
-                    warn!("构建新会话失败 for {}: {}", client_addr, e);
-                }
+                // 启动后端响应处理任务
+                let backend_addr = prepared_session.backend_socket.peer_addr()?;
+                self.start_backend_handler(&client_addr, backend_addr, 
+                    Arc::clone(&prepared_session.backend_socket), 
+                    prepared_session.cancel_token.clone());
+                
+                // 插入会话
+                entry.insert(prepared_session);
+                
+                let current_sessions = self.active_sessions.load(Ordering::Relaxed);
+                info!("创建新 UDP 会话: {} -> {} (总会话数: {})", client_addr, backend_addr, current_sessions);
             }
         }
         Ok(())
     }
 
-    /// 辅助函数，处理新会话的构建、启动和插入逻辑
-    async fn build_and_launch_session<'a>(
-        &self,
-        entry: dashmap::mapref::entry::VacantEntry<'a, SocketAddr, Arc<UdpSession>>,
-        first_packet_data: Bytes,
-    ) -> Result<()> {
+    /// 准备新会话（不持有锁）
+    async fn prepare_session(&self) -> Result<Arc<UdpSession>> {
         // 选择后端
         let backend = self.load_balancer.select_backend()
             .ok_or_else(|| anyhow::anyhow!("没有可用的后端服务器"))?;
@@ -273,27 +295,6 @@ impl UdpProxyHandler {
         let backend_socket = UdpSocket::bind("0.0.0.0:0").await?;
         backend_socket.connect(backend.address).await?;
         let backend_socket = Arc::new(backend_socket);
-
-        // 准备并发送第一个数据包（这是唯一可能发送 PROXY Protocol 头的地方）
-        if self.enable_proxy_protocol {
-            let proxy_header = ProxyHeader { src_addr: *entry.key(), dst_addr: backend.address, protocol: Protocol::UDP };
-            let header_bytes = ProxyProtocolV2::generate_header(&proxy_header);
-            
-            // 检查附加协议头后是否超过 UDP 最大载荷
-            let total_size = header_bytes.len() + first_packet_data.len();
-            if total_size > MAX_PACKET_SIZE {
-                warn!("附加协议头后超过 UDP 最大载荷限制: {} > {}", total_size, MAX_PACKET_SIZE);
-                // 发送原始数据，不加头部
-                backend_socket.send(&first_packet_data).await?;
-            } else {
-                let mut full_packet = BytesMut::with_capacity(total_size);
-                full_packet.extend_from_slice(&header_bytes);
-                full_packet.extend_from_slice(&first_packet_data);
-                backend_socket.send(&full_packet).await?;
-            }
-        } else {
-            backend_socket.send(&first_packet_data).await?;
-        }
 
         // 创建会话守卫（如果启用了会话限制）
         let guard = if self.max_sessions > 0 {
@@ -307,22 +308,46 @@ impl UdpProxyHandler {
         // 创建会话
         let cancel_token = CancellationToken::new();
         let new_session = Arc::new(UdpSession {
-            backend_socket: Arc::clone(&backend_socket),
+            backend_socket,
             last_activity_ms: AtomicU64::new(self.epoch.elapsed().as_millis() as u64),
-            cancel_token: cancel_token.clone(),
+            cancel_token,
             _guard: guard,
         });
 
-        // 启动后端响应处理任务
-        self.start_backend_handler(entry.key(), backend.address, backend_socket, cancel_token);
+        Ok(new_session)
+    }
 
-        let key = entry.key().clone();
-
-        // 原子性地插入会话
-        entry.insert(new_session);
-
-        let current_sessions = self.active_sessions.load(Ordering::Relaxed);
-        info!("创建新 UDP 会话: {} -> {} (总会话数: {})", key, backend.address, current_sessions);
+    /// 发送第一个数据包（可能包含 PROXY Protocol 头）
+    async fn send_first_packet(
+        &self,
+        backend_socket: &UdpSocket,
+        client_addr: SocketAddr,
+        data: &Bytes,
+    ) -> Result<()> {
+        if self.enable_proxy_protocol {
+            let backend_addr = backend_socket.peer_addr()?;
+            let proxy_header = ProxyHeader { 
+                src_addr: client_addr, 
+                dst_addr: backend_addr, 
+                protocol: Protocol::UDP 
+            };
+            let header_bytes = ProxyProtocolV2::generate_header(&proxy_header);
+            
+            // 检查附加协议头后是否超过 UDP 最大载荷
+            let total_size = header_bytes.len() + data.len();
+            if total_size > MAX_PACKET_SIZE {
+                warn!("附加协议头后超过 UDP 最大载荷限制: {} > {}", total_size, MAX_PACKET_SIZE);
+                // 发送原始数据，不加头部
+                backend_socket.send(data).await?;
+            } else {
+                let mut full_packet = BytesMut::with_capacity(total_size);
+                full_packet.extend_from_slice(&header_bytes);
+                full_packet.extend_from_slice(data);
+                backend_socket.send(&full_packet).await?;
+            }
+        } else {
+            backend_socket.send(data).await?;
+        }
         Ok(())
     }
 
